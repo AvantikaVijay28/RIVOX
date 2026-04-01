@@ -110,18 +110,30 @@ class Fight(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-
     clip_path = db.Column(db.String(255))
     fight_score = db.Column(db.Float)
 
-    fire_detected = db.Column(db.Boolean, default=False)
-    weapon_detected = db.Column(db.Boolean, default=False)
+
+class Fire(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    clip_path = db.Column(db.String(255))
+    fight_score = db.Column(db.Float)
+
+
+class Weapon(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    clip_path = db.Column(db.String(255))
+    fight_score = db.Column(db.Float)
 
 FIGHT_LOG = []
 
 # ---- Tunable params (editable from Flutter) ----
 STAGE1_ELASTICITY_SECONDS = 5.0     # was hardcoded "elapsed >= 2"
-STAGE2_THRESHOLD = 0.50            # passed into analyze_clip()
+STAGE2_THRESHOLD = 0.50           # passed into analyze_clip()
 
 # ---- Detection toggles ----
 ENABLE_FIRE_DETECTION = False
@@ -423,8 +435,6 @@ def stage2_worker(video_filename):
             new_fight = Fight(
                 clip_path=os.path.basename(video_path),
                 fight_score=round(prob, 2),
-                fire_detected=False,
-                weapon_detected=False
             )
             db.session.add(new_fight)
             db.session.commit()
@@ -676,16 +686,54 @@ def live_detection():
         view = frame.copy()
 
         # Draw YOLO boxes (overlay on display + live_feed)
-        if last_weapon_result is not None:
-            try:
-                view = last_weapon_result.plot(img=view)
-            except Exception:
-                view = last_weapon_result.plot()
-        if last_fire_result is not None:
-            try:
-                view = last_fire_result.plot(img=view)
-            except Exception:
-                view = last_fire_result.plot()
+        # ---------------- DRAW WEAPON BOXES (ONLY ABOVE THRESHOLD) ----------------
+        if last_weapon_result is not None and last_weapon_result.boxes is not None:
+            for b in last_weapon_result.boxes:
+                conf = float(b.conf[0])
+                cls = int(b.cls[0])
+                name = weapon_model.names.get(cls, str(cls))
+
+                thr = WEAPON_ALERT_THR.get(name, WEAPON_DEFAULT_THR)
+
+                if conf >= thr:
+                    x1, y1, x2, y2 = map(int, b.xyxy[0])
+
+                    cv2.rectangle(view, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+                    label = f"{name} {conf:.2f}"
+                    cv2.putText(
+                        view,
+                        label,
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 0, 255),
+                        2
+                    )
+
+
+# ---------------- DRAW FIRE BOXES (ONLY ABOVE THRESHOLD) ----------------
+        if last_fire_result is not None and last_fire_result.boxes is not None:
+            for b in last_fire_result.boxes:
+                conf = float(b.conf[0])
+                cls = int(b.cls[0])
+                name = _norm(fire_model.names.get(cls, ""))
+
+                if name == "fire" and conf >= FIRE_ALERT_THR:
+                    x1, y1, x2, y2 = map(int, b.xyxy[0])
+
+                    cv2.rectangle(view, (x1, y1), (x2, y2), (0, 165, 255), 2)
+
+                    label = f"Fire {conf:.2f}"
+                    cv2.putText(
+                        view,
+                        label,
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 165, 255),
+                        2
+                    )
 
         # Fight overlay
         status = "MONITORING"
@@ -721,6 +769,14 @@ def live_detection():
                             "probability": 1.0,
                             "type": "fire"
                     })
+                    with app.app_context():
+                        new_fire = Fire(
+                            clip_path=clip_name,
+                            fight_score=1.0,
+                        )
+                        db.session.add(new_fire)
+                        db.session.commit()
+                        print("✅ Fire saved to SQL")
                 send_push_notification("Fire Detected", "Fire has been detected.")
 
         recording = False
@@ -743,6 +799,14 @@ def live_detection():
                             "probability": 1.0,
                             "type": "weapon"
                     })
+                    with app.app_context():
+                        new_weapon = Weapon(
+                            clip_path=clip_name,
+                            fight_score=1.0,
+                        )
+                        db.session.add(new_weapon)
+                        db.session.commit()
+                        print("✅ Weapon saved to SQL")
                 send_push_notification("Weapon Detected", "A weapon has been detected.")
 
         recording = False
